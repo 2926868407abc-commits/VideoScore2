@@ -5,6 +5,7 @@ import json
 import os
 import re
 from string import Template
+from datetime import datetime
 
 import cv2
 import numpy as np
@@ -249,11 +250,20 @@ def main(args):
         print("==============================\n")
 
     final_json = json.dumps(batch_result, indent=2, ensure_ascii=False)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    os.makedirs("outputs", exist_ok=True)
     if args.save_path:
-        save_path = os.path.abspath(args.save_path)
-        with open(save_path, "w", encoding="utf-8") as f:
-            f.write(final_json)
-        print(f"Saved results to: {save_path}")
+        save_name = os.path.basename(args.save_path)
+        stem, ext = os.path.splitext(save_name)
+        if not ext:
+            ext = ".json"
+        save_path = os.path.abspath(os.path.join("outputs", f"{stem}_{timestamp}{ext}"))
+    else:
+        save_path = os.path.abspath(os.path.join("outputs", f"vs2_inference_{timestamp}.json"))
+
+    with open(save_path, "w", encoding="utf-8") as f:
+        f.write(final_json)
+    print(f"Saved results to: {save_path}")
 
     print(final_json)
 
@@ -267,7 +277,7 @@ if __name__ == "__main__":
     parser.add_argument("--infer_fps", default=2.0, help="Inference fps or 'raw'")
     parser.add_argument("--max_tokens", type=int, default=1024, help="Maximum generated tokens")
     parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
-    parser.add_argument("--save_path", type=str, default=None, help="Optional JSON output path")
+    parser.add_argument("--save_path", type=str, default=None, help="Optional output file name under outputs/; a timestamp is always appended to avoid overwriting")
     args = parser.parse_args()
 
     main(args)
