@@ -40,7 +40,8 @@ def ll_based_soft_score_normed(hard_val, token_idx, scores, tokenizer):
 
 def find_score_token_index_by_prompt(prompt_text, tokenizer, gen_ids):
     gen_str = tokenizer.decode(gen_ids, skip_special_tokens=False)
-    pattern = r"(?:\(\d+\)\s*|\n\s*)?" + re.escape(prompt_text)
+    key = prompt_text.rstrip(":")
+    pattern = r"(?:\(\d+\)\s*|\n\s*)?" + re.escape(key) + r"[^:]*:"
     match = re.search(pattern, gen_str, flags=re.IGNORECASE)
     if not match:
         return -1
@@ -120,7 +121,7 @@ def main(MODEL_NAME, video_path, t2v_prompt):
     print("\n[Raw Model Output]\n", output_text)
 
     # --- parse scores ---
-    pattern = r"visual quality:\s*(\d+).*?text-to-video alignment:\s*(\d+).*?physical/common-sense consistency:\s*(\d+)"
+    pattern = pattern = r"visual quality[^:]*:\s*(\d+).*?text-to-video alignment[^:]*:\s*(\d+).*?physical/common-sense consistency[^:]*:\s*(\d+)"
     match = re.search(pattern, output_text, re.DOTALL | re.IGNORECASE)
     v_score = int(match.group(1)) if match else None
     t_score = int(match.group(2)) if match else None
@@ -146,7 +147,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="VideoScore2 Inference Script")
     parser.add_argument("--video_path", type=str, required=True, help="Path to input video file")
     parser.add_argument("--t2v_prompt", type=str, required=True, help="Text prompt used to generate the video")
-    parser.add_argument("--model_name", type=str, default="TIGER-Lab/VideoScore2", help="Model name or path")
+    parser.add_argument("--model_name", type=str, default="/mnt/data/wangqq/models/VideoScore2", help="Model name or path")
     args = parser.parse_args()
 
     main(args.model_name, args.video_path, args.t2v_prompt)
