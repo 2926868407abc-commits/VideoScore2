@@ -39,6 +39,15 @@ DIMENSIONS = [
     ("p", "physical/common-sense consistency:"),
 ]
 
+DTYPE_MAP = {
+    "auto": "auto",
+    "float32": torch.float32,
+    "float16": torch.float16,
+    "fp16": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "bf16": torch.bfloat16,
+}
+
 
 def _get_video_fps(url_or_p: str):
     cap = cv2.VideoCapture(url_or_p)
@@ -141,13 +150,44 @@ def _resolve_video_paths(video_paths, video_dir):
     return deduped
 
 
+def _resolve_torch_dtype(dtype_name: str):
+    key = str(dtype_name).lower()
+    if key not in DTYPE_MAP:
+        raise ValueError(f"Unsupported dtype: {dtype_name}")
+    return DTYPE_MAP[key]
+
+
 class VideoScore2BatchInferencer:
-    def __init__(self, model_name):
+    def __init__(self, model_name, dtype="auto", device="cuda", device_map=None):
         print(f"[Init] Loading model: {model_name}")
+        torch_dtype = _resolve_torch_dtype(dtype)
+        load_kwargs = {
+            "trust_remote_code": True,
+            "low_cpu_mem_usage": True,
+        }
+        if torch_dtype != "auto":
+            load_kwargs["torch_dtype"] = torch_dtype
+        if device_map:
+            load_kwargs["device_map"] = device_map
+
         self.model = AutoModelForVision2Seq.from_pretrained(
             model_name,
-            trust_remote_code=True,
-        ).to("cuda")
+            **load_kwargs,
+        )
+        self.input_device = device
+        if device_map:
+            hf_device_map = getattr(self.model, "hf_device_map", {}) or {}
+            non_cpu_devices = [
+                mapped_device
+                for mapped_device in hf_device_map.values()
+                if isinstance(mapped_device, str) and mapped_device not in {"cpu", "disk"}
+            ]
+            if non_cpu_devices:
+                self.input_device = non_cpu_devices[0]
+        else:
+            self.model = self.model.to(device)
+
+        self.model.eval()
         self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
         self.tokenizer = getattr(self.processor, "tokenizer", None) or AutoTokenizer.from_pretrained(
             model_name,
@@ -180,7 +220,7 @@ class VideoScore2BatchInferencer:
             fps=infer_fps,
             padding=True,
             return_tensors="pt",
-        ).to("cuda")
+        ).to(self.input_device)
 
         gen_out = self.model.generate(
             **inputs,
@@ -224,7 +264,12 @@ class VideoScore2BatchInferencer:
 
 def main(args):
     video_paths = _resolve_video_paths(args.video_path, args.video_dir)
-    inferencer = VideoScore2BatchInferencer(args.model_name)
+    inferencer = VideoScore2BatchInferencer(
+        args.model_name,
+        dtype=args.dtype,
+        device=args.device,
+        device_map=args.device_map,
+    )
 
     batch_result = {
         "prompt": args.t2v_prompt,
@@ -277,6 +322,9 @@ if __name__ == "__main__":
     parser.add_argument("--infer_fps", default=2.0, help="Inference fps or 'raw'")
     parser.add_argument("--max_tokens", type=int, default=1024, help="Maximum generated tokens")
     parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
+    parser.add_argument("--dtype", type=str, default="auto", choices=sorted(DTYPE_MAP.keys()), help="Model loading dtype")
+    parser.add_argument("--device", type=str, default="cuda", help="Target device when not using device_map, e.g. cuda or cuda:0")
+    parser.add_argument("--device_map", type=str, default=None, help="Transformers device_map, e.g. auto")
     parser.add_argument("--save_path", type=str, default=None, help="Optional output file name under outputs/; a timestamp is always appended to avoid overwriting")
     args = parser.parse_args()
 
