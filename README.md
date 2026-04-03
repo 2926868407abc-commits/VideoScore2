@@ -46,11 +46,93 @@ pip install scipy
 pip install numpy==2.2.6
 ```
 
-Run inference on one video:
+Run inference on one or more videos that share the same prompt:
 ```
-python vs2_inference.py \ 
-  --video_path=<path of your video> \
-  --t2v_prompt=<corresponding text prompt for your video>
+python vs2_inference.py \
+  --video_path <path_of_video_1> <path_of_video_2> \
+  --t2v_prompt "<shared text prompt>" \
+  --save_path result.json
+```
+
+or:
+```
+python vs2_inference.py \
+  --video_dir <dir_of_videos> \
+  --t2v_prompt "<shared text prompt>" \
+  --save_path result.json
+```
+
+The inference output is a structured JSON object:
+```json
+{
+  "prompt": "a shared prompt for all videos",
+  "num_videos": 2,
+  "videos": [
+    {
+      "video_name": "video_001",
+      "v_expected_score": 3.64,
+      "v_hard_score": 4,
+      "v_confidence": 0.56,
+      "t_expected_score": 4.72,
+      "t_hard_score": 5,
+      "t_confidence": 0.81,
+      "p_expected_score": 3.18,
+      "p_hard_score": 3,
+      "p_confidence": 0.49
+    }
+  ]
+}
+```
+
+Field meanings:
+- `*_hard_score`: the integer score parsed from the model output, in `1~5`
+- `*_expected_score`: the expected score over the legal score space `{1,2,3,4,5}`
+- `*_confidence`: the normalized max probability over the legal score space `{1,2,3,4,5}`
+
+where `v/t/p` correspond to:
+  - `v`: visual quality
+  - `t`: text-to-video alignment
+  - `p`: physical/common-sense consistency
+
+Example saved `result.json`:
+```json
+{
+  "prompt": "a girl in red playing with a cartoon snake in a festive scene",
+  "num_videos": 2,
+  "videos": [
+    {
+      "video_name": "sample_video_01",
+      "v_expected_score": 3.8421,
+      "v_hard_score": 4,
+      "v_confidence": 0.6123,
+      "t_expected_score": 4.4178,
+      "t_hard_score": 5,
+      "t_confidence": 0.7345,
+      "p_expected_score": 3.1064,
+      "p_hard_score": 3,
+      "p_confidence": 0.4812
+    },
+    {
+      "video_name": "sample_video_02",
+      "v_expected_score": 2.9542,
+      "v_hard_score": 3,
+      "v_confidence": 0.5031,
+      "t_expected_score": 3.8875,
+      "t_hard_score": 4,
+      "t_confidence": 0.5987,
+      "p_expected_score": 2.6679,
+      "p_hard_score": 2,
+      "p_confidence": 0.4426
+    }
+  ]
+}
+```
+
+How to read the result:
+- Use `v_expected_score`, `t_expected_score`, and `p_expected_score` as the main continuous scores for comparing videos under the same prompt.
+- Use `v_hard_score`, `t_hard_score`, and `p_hard_score` when you want the model's final discrete `1~5` judgment.
+- Use `v_confidence`, `t_confidence`, and `p_confidence` as a conservative filter: higher confidence means the model is more certain within the legal score space `{1,2,3,4,5}`.
+- In practice, rank videos by the expected scores first, then use confidence to break ties or filter out uncertain samples.
 ```
 
 ## Training

@@ -123,6 +123,11 @@ python get_pairwise_acc.py \
 ```
 
 The path to the saved scores is automatically determined by the default configuration of each method.
-For example, when evaluating "vs2_float" on the benchmark "vs2_bench", we are using default config `infer_fps=2` and `temperature=0.7` by default, so the score_path is ```res_data/res_vs2_bench/VideoScore2_infer_2fps_float_weighted_tempe=0.7.json```. 
+For example, when evaluating `vs2_float` on the benchmark `vs2_bench`, we are using default config `infer_fps=2` and `temperature=0.7` by default, so the score_path is `res_data/res_vs2_bench/VideoScore2_infer_2fps_float_normed_tempe=0.7.json`.
+
+Notes on VideoScore2 float outputs:
+- `vs2_float` now uses the expected score over the legal score space `{1,2,3,4,5}` as the main floating score.
+- The saved result file also keeps structured fields such as `v_expected_score`, `v_hard_score`, `v_confidence`, and the corresponding `t/p` fields for later analysis.
+- `vs2_float_weighted` is kept only for backward compatibility with legacy confidence-adjusted scoring behavior.
 
 You can also modify `--score_path` if you use different configurations.

@@ -1,22 +1,26 @@
 from transformers import AutoProcessor, AutoModelForVision2Seq, AutoTokenizer
 from qwen_vl_utils import process_vision_info
-import torch
-import numpy as np
-import cv2, os, re
+import os
+import re
 
-def _get_video_fps(url_or_p:str):
+import cv2
+import numpy as np
+import torch
+
+
+def _get_video_fps(url_or_p: str):
     cap = cv2.VideoCapture(url_or_p)
     if not cap.isOpened():
         raise ValueError(f"Cannot open video: {url_or_p}")
-    
+
     fps = cap.get(cv2.CAP_PROP_FPS)
     cap.release()
     return fps
 
-class eval_VideoScore2_float:
-    def __init__(self, model_name: str, floating_method: str = "normed"):
-        self.model, self.processor = self.load_model_processor(model_name)
 
+class eval_VideoScore2_float:
+    def __init__(self, model_name: str, floating_method: str = "expected"):
+        self.model, self.processor = self.load_model_processor(model_name)
         self.tokenizer = getattr(self.processor, "tokenizer", None)
         if self.tokenizer is None:
             self.tokenizer = AutoTokenizer.from_pretrained(
@@ -24,8 +28,17 @@ class eval_VideoScore2_float:
                 trust_remote_code=True,
                 use_fast=False,
             )
-        self.floating_method = floating_method.lower()
-        assert self.floating_method in ["normed","weighted"], f"invalid floating_method: {floating_method}"
+
+        alias_map = {
+            "normed": "confidence_adjusted",
+            "weighted": "expected",
+            "expected": "expected",
+            "confidence_adjusted": "confidence_adjusted",
+        }
+        self.floating_method = alias_map.get(floating_method.lower())
+        assert self.floating_method in ["expected", "confidence_adjusted"], (
+            f"invalid floating_method: {floating_method}"
+        )
 
     def load_model_processor(self, model_name):
         model = AutoModelForVision2Seq.from_pretrained(
@@ -34,21 +47,34 @@ class eval_VideoScore2_float:
         ).to("cuda")
         processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
         return model, processor
-    
-    
-    def evaluate_video(self,     
-            user_prompt: str,
-            video_path: str,
-            kwargs: dict
-        ) -> str | None:
+
+    def evaluate_video(self, user_prompt: str, video_path: str, kwargs: dict) -> str | None:
+        metrics, output_text = self.evaluate_video_structured(user_prompt, video_path, kwargs)
+        if self.floating_method == "expected":
+            return (
+                metrics["v_expected_score"],
+                metrics["t_expected_score"],
+                metrics["p_expected_score"],
+                output_text,
+            )
+
+        return (
+            metrics["v_confidence_adjusted_score"],
+            metrics["t_confidence_adjusted_score"],
+            metrics["p_confidence_adjusted_score"],
+            output_text,
+        )
+
+    def evaluate_video_structured(self, user_prompt: str, video_path: str, kwargs: dict):
         if not os.path.exists(video_path):
             raise ValueError(f"not exist: {video_path}")
-        max_tokens=kwargs.get("max_tokens",4096)
-        infer_fps=kwargs.get("infer_fps",2.0)
-        temperature=kwargs.get("temperature",0.7)
+
+        max_tokens = kwargs.get("max_tokens", 4096)
+        infer_fps = kwargs.get("infer_fps", 2.0)
+        temperature = kwargs.get("temperature", 0.7)
         if infer_fps == "raw":
-            infer_fps=_get_video_fps(video_path)
-        
+            infer_fps = _get_video_fps(video_path)
+
         messages = [
             {
                 "role": "user",
@@ -56,10 +82,10 @@ class eval_VideoScore2_float:
                     {
                         "type": "video",
                         "video": video_path,
-                        "fps":infer_fps
+                        "fps": infer_fps,
                     },
                     {
-                        "type": "text", 
+                        "type": "text",
                         "text": user_prompt,
                     },
                 ],
@@ -71,7 +97,7 @@ class eval_VideoScore2_float:
         )
         try:
             image_inputs, video_inputs = process_vision_info(messages)
-        except Exception as e:
+        except Exception:
             raise ValueError(f"error when reading: {video_path}")
 
         inputs = self.processor(
@@ -81,9 +107,8 @@ class eval_VideoScore2_float:
             fps=infer_fps,
             padding=True,
             return_tensors="pt",
-        )
-        inputs = inputs.to("cuda")
-        
+        ).to("cuda")
+
         gen_out = self.model.generate(
             **inputs,
             max_new_tokens=max_tokens,
@@ -92,136 +117,119 @@ class eval_VideoScore2_float:
             do_sample=True,
             temperature=temperature,
         )
-        sequences = gen_out.sequences  
-        scores = gen_out.scores        
-
+        sequences = gen_out.sequences
+        scores = gen_out.scores
         input_len = inputs["input_ids"].shape[1]
-        
         gen_token_ids = sequences[0, input_len:].tolist()
-            
+
         output_text = self.processor.batch_decode(
-            sequences[:, input_len:], skip_special_tokens=True, clean_up_tokenization_spaces=False
+            sequences[:, input_len:],
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
         )[0]
-        
-        pattern = r"visual quality:\s*(\d+).*?text-to-video alignment:\s*(\d+).*?physical/common-sense consistency:\s*(\d+)"
+
+        pattern = (
+            r"visual quality:\s*(\d+).*?"
+            r"text-to-video alignment:\s*(\d+).*?"
+            r"physical/common-sense consistency:\s*(\d+)"
+        )
         match = re.search(pattern, output_text, re.DOTALL | re.IGNORECASE)
         if match:
-            v_score_model = int(match.group(1))
-            t_score_model = int(match.group(2))
-            p_score_model = int(match.group(3))
+            hard_scores = {
+                "v": int(match.group(1)),
+                "t": int(match.group(2)),
+                "p": int(match.group(3)),
+            }
         else:
-            v_score_model = t_score_model = p_score_model = None 
-        
-        def find_score_token_index_by_prompt(prompt_text: str):
-            import re
-            gen_ids = gen_token_ids
-            gen_str = self.tokenizer.decode(gen_ids, skip_special_tokens=False)
+            hard_scores = {"v": None, "t": None, "p": None}
 
+        def find_score_token_index_by_prompt(prompt_text: str):
+            gen_str = self.tokenizer.decode(gen_token_ids, skip_special_tokens=False)
             pattern = r"(?:\(\d+\)\s*|\n\s*)?" + re.escape(prompt_text)
-            match = re.search(pattern, gen_str, flags=re.IGNORECASE)
-            if not match:
+            match_ = re.search(pattern, gen_str, flags=re.IGNORECASE)
+            if not match_:
                 return -1
-            after_text = gen_str[match.end():]
+
+            after_text = gen_str[match_.end():]
             num_match = re.search(r"\d", after_text)
             if not num_match:
                 return -1
 
-            target_substr = gen_str[:match.end() + num_match.start() + 1]
-
-            for i in range(len(gen_ids)):
-                partial = self.tokenizer.decode(gen_ids[:i+1], skip_special_tokens=False)
+            target_substr = gen_str[: match_.end() + num_match.start() + 1]
+            for i in range(len(gen_token_ids)):
+                partial = self.tokenizer.decode(gen_token_ids[: i + 1], skip_special_tokens=False)
                 if partial == target_substr:
                     return i
             return -1
 
-        
+        def get_score_probs(token_idx):
+            if token_idx < 0:
+                return []
+
+            logits = scores[token_idx][0]
+            log_probs = torch.log_softmax(logits, dim=-1)
+            score_probs = []
+            for score in range(1, 6):
+                ids = self.tokenizer.encode(str(score), add_special_tokens=False)
+                if len(ids) != 1:
+                    continue
+                prob = float(np.exp(log_probs[ids[0]].item()))
+                score_probs.append((score, prob))
+            return score_probs
+
+        def compute_metrics(hard_score, token_idx):
+            score_probs = get_score_probs(token_idx)
+            if hard_score is None or not score_probs:
+                return {
+                    "expected_score": None,
+                    "hard_score": hard_score,
+                    "confidence": None,
+                    "confidence_adjusted_score": None,
+                }
+
+            _, probs = zip(*score_probs)
+            total_prob = sum(probs)
+            if total_prob <= 0:
+                return {
+                    "expected_score": None,
+                    "hard_score": hard_score,
+                    "confidence": None,
+                    "confidence_adjusted_score": None,
+                }
+
+            norm_probs = [(score, prob / total_prob) for score, prob in score_probs]
+            expected_score = round(sum(score * prob for score, prob in norm_probs), 4)
+            confidence = round(max(prob for _, prob in norm_probs), 4)
+            best_score = max(norm_probs, key=lambda x: x[1])[0]
+            confidence_adjusted_score = round(best_score * confidence, 4)
+            return {
+                "expected_score": expected_score,
+                "hard_score": hard_score,
+                "confidence": confidence,
+                "confidence_adjusted_score": confidence_adjusted_score,
+            }
+
         idx_v = find_score_token_index_by_prompt("visual quality:")
         idx_t = find_score_token_index_by_prompt("text-to-video alignment:")
         idx_p = find_score_token_index_by_prompt("physical/common-sense consistency:")
-        
-        def ll_based_soft_score_normed(hard_val, token_idx) -> float:
-            if hard_val is None or token_idx < 0:
-                return None
-            logits = scores[token_idx][0]  # [vocab]
-            score_range = list(range(1, 6))
-            score_probs = []  # [(score, prob)]
 
-            for s in score_range:
-                ids = self.tokenizer.encode(str(s), add_special_tokens=False)
-                if len(ids) == 1:
-                    tid = ids[0]
-                    logp = torch.log_softmax(logits, dim=-1)[tid].item()
-                    prob = float(np.exp(logp))
-                    score_probs.append((s, prob))
-                else:
-                    print(f"[warn] score {s} maps to multi-token: {ids}, skipping.")
+        v_metrics = compute_metrics(hard_scores["v"], idx_v)
+        t_metrics = compute_metrics(hard_scores["t"], idx_t)
+        p_metrics = compute_metrics(hard_scores["p"], idx_p)
 
-            if not score_probs:
-                print("[warn] No valid score token found (1–5 all multi-token?)")
-                return None
+        structured_metrics = {
+            "v_expected_score": v_metrics["expected_score"],
+            "v_hard_score": v_metrics["hard_score"],
+            "v_confidence": v_metrics["confidence"],
+            "v_confidence_adjusted_score": v_metrics["confidence_adjusted_score"],
+            "t_expected_score": t_metrics["expected_score"],
+            "t_hard_score": t_metrics["hard_score"],
+            "t_confidence": t_metrics["confidence"],
+            "t_confidence_adjusted_score": t_metrics["confidence_adjusted_score"],
+            "p_expected_score": p_metrics["expected_score"],
+            "p_hard_score": p_metrics["hard_score"],
+            "p_confidence": p_metrics["confidence"],
+            "p_confidence_adjusted_score": p_metrics["confidence_adjusted_score"],
+        }
 
-            scores_list, probs_list = zip(*score_probs)
-            total_prob = sum(probs_list)
-            max_prob = max(probs_list)
-            max_idx = probs_list.index(max_prob)
-            best_score = scores_list[max_idx]
-
-            normalized_prob = max_prob / total_prob if total_prob > 0 else 0
-            soft_score = best_score * normalized_prob
-
-            print(f"hard score={hard_val}, token_idx={token_idx}")
-            for s, p in score_probs:
-                print(f"  score {s}: prob={p:.4f}")
-            print(f"  max prob={max_prob:.4f} at score={best_score}, total prob={total_prob:.4f}")
-            print(f"  normalized prob={normalized_prob:.4f}, soft score={soft_score:.4f}")
-
-            return round(soft_score,4)
-    
-        def ll_based_soft_score_weighted(hard_val, token_idx) -> float:
-            if hard_val is None or token_idx < 0:
-                return None
-
-            logits = scores[token_idx][0]  # [vocab]
-
-            score_range = list(range(1, 6))
-            score_probs = []  # [(score, prob)]
-
-            for s in score_range:
-                ids = self.tokenizer.encode(str(s), add_special_tokens=False)
-                if len(ids) == 1:
-                    tid = ids[0]
-                    logp = torch.log_softmax(logits, dim=-1)[tid].item()
-                    prob = float(np.exp(logp))
-                    score_probs.append((s, prob))
-                else:
-                    print(f"[warn] score {s} maps to multi-token: {ids}, skipping.")
-
-            if not score_probs:
-                print("[warn] No valid score token found (1–5 all multi-token?)")
-                return None
-
-            scores_list, probs_list = zip(*score_probs)
-            total_prob = sum(probs_list)
-            norm_probs = [p / total_prob for p in probs_list]
-
-            soft_score = sum(s * p for s, p in zip(scores_list, norm_probs))
-
-            print(f"hard score={hard_val}, token_idx={token_idx}")
-            for s, p, np_ in zip(scores_list, probs_list, norm_probs):
-                print(f"  score {s}: raw_prob={p:.4f}, norm_prob={np_:.4f}")
-            print(f"soft score (weighted average) = {soft_score:.4f}")
-
-            return round(soft_score,4)
-        
-        if self.floating_method == "normed":
-            v_soft = ll_based_soft_score_weighted(v_score_model, idx_v)
-            t_soft = ll_based_soft_score_weighted(t_score_model, idx_t)
-            p_soft = ll_based_soft_score_weighted(p_score_model, idx_p)
-        else:  # weighted
-            v_soft = ll_based_soft_score_normed(v_score_model, idx_v)
-            t_soft = ll_based_soft_score_normed(t_score_model, idx_t)
-            p_soft = ll_based_soft_score_normed(p_score_model, idx_p)
-
-        return v_soft, t_soft, p_soft, output_text
-        
-    
+        return structured_metrics, output_text
